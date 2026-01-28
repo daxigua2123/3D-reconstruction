@@ -49,7 +49,6 @@ def predict_img(net,full_img,out_threshold,device):
         img = img / 255.0
     img = torch.from_numpy(img).unsqueeze(0)
     img = img.to(device=device, dtype=torch.float32)
-    #img_shape应该是([1,1,572,572])
     with torch.no_grad():
         output = net(img)
     output = F.interpolate(output, (2048, 2448), mode='bilinear')
@@ -59,7 +58,7 @@ def predict_img(net,full_img,out_threshold,device):
 net = VGG_CA_Net(bilinear=True)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 net.to(device=device)
-model = 'segment/checkpoint_epoch144.pth'
+model = 'segment/checkpoint.pth'
 state_dict = torch.load(model, map_location=device,weights_only=True)
 mask_values = state_dict.pop('mask_values', [0, 1, 2])
 net.load_state_dict(state_dict)
