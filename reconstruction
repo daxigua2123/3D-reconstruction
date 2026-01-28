@@ -1,1 +1,115 @@
+import cv2
+import torch
+from VGG_CA_Net import VGG_CA_Net
+from PIL import Image
+import numpy as np
+import torch.nn.functional as F
+from matplotlib import pyplot as plt
+from steger import getcenterline
+import open3d as o3d
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
+
+def getworldpoint(linepoint,intri,plane):
+    A,B,C,D = plane
+    k = intri
+    homogeneous_points = np.hstack((linepoint, np.ones((linepoint.shape[0], 1))))
+    normalized_points = np.dot(np.linalg.inv(k), homogeneous_points.T).T
+    x_n = normalized_points[:, 0]
+    y_n = normalized_points[:, 1]
+    t = -D / (A * x_n + B * y_n + C)
+    X = t * x_n
+    Y = t * y_n
+    Z = t
+    world_coordinates = np.column_stack((X, Y, Z))
+    return  world_coordinates
+def getsegimg(img,   mask,  visualization = False):
+    indices = np.argwhere(mask == 1)
+    if indices.size > 0:
+        x_min, y_min = indices.min(axis=0)
+        x_max, y_max = indices.max(axis=0)
+        output_img = img[ x_min:x_max ,y_min:y_max ]
+        segimg = output_img*mask[ x_min:x_max ,y_min:y_max ]
+        if visualization:
+            plt.imshow(segimg)
+            plt.show()
+        return segimg,x_min,y_min
+
+
+def predict_img(net,full_img,out_threshold,device):
+    net.eval()
+    pil_img = cv2.resize(full_img, (512,512), interpolation=cv2.INTER_CUBIC)
+    img = np.array(pil_img)
+    if img.ndim == 2:
+        img = img[np.newaxis, ...]
+    else:
+        img = img.transpose((2, 0, 1))
+    if (img > 1).any():
+        img = img / 255.0
+    img = torch.from_numpy(img).unsqueeze(0)
+    img = img.to(device=device, dtype=torch.float32)
+    #img_shape应该是([1,1,572,572])
+    with torch.no_grad():
+        output = net(img)
+    output = F.interpolate(output, (2048, 2448), mode='bilinear')
+    mask = torch.sigmoid(output) > out_threshold
+    return mask[0].long().cpu().squeeze().numpy()
+
+net = VGG_CA_Net(bilinear=True)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+net.to(device=device)
+model = 'segment/checkpoint_epoch144.pth'
+state_dict = torch.load(model, map_location=device,weights_only=True)
+mask_values = state_dict.pop('mask_values', [0, 1, 2])
+net.load_state_dict(state_dict)
+
+camerapara = np.load('camera_para_2_260112.npz')  
+planepara = np.load('plane_para_2_260112.npz')  
+mat_intri = camerapara['intri']
+coff_dis = camerapara['dis']
+plane = planepara['plane']
+
+cap = cv2.VideoCapture('......')
+fps = cap.get(cv2.CAP_PROP_FPS)
+frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+print('fps',fps)
+print('frame_count',frame_count)
+
+wholeworldpoint  = np.empty((0, 3))
+num = 0
+while True:
+    ret, frame = cap.read()
+
+    if not ret:
+      num -= 1
+      break
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  
+    gray = cv2.undistort(gray, mat_intri, coff_dis)
+    mask = predict_img(net=net,
+                       full_img=gray,
+                       # scale_factor=args.scale,
+                       out_threshold=0.5,
+                       device=device)             
+    segimg,x,y = getsegimg(gray,mask,False)
+    distoredcenterlinelist = getcenterline(segimg, False)
+    distoredcenterline = np.array(distoredcenterlinelist)
+    distoredcenterline[:, 0] += x 
+    distoredcenterline[:, 1] += y 
+    distoredcenterline = np.column_stack((distoredcenterline[:, 1], distoredcenterline[:, 0]))
+    
+    centerline = distoredcenterline
+    # centerline = cv2.undistortImagePoints(distoredcenterline, mat_intri, coff_dis).squeeze(axis=1)
+    # centerline = cv2.undistortPoints(distoredcenterline, mat_intri, coff_dis).squeeze(axis=1)
+    worldpoint = getworldpoint(centerline,mat_intri,plane)
+
+    v = 5   #5mm/s    10f/s
+    vec = np.array([0.84024896,  0.46777417, -0.27416965])
+    disvector =num*v/fps*vec   
+    worldpoint = worldpoint+disvector
+    wholeworldpoint = np.vstack((wholeworldpoint, worldpoint))  
+
+    num += 1
+point_cloud = o3d.geometry.PointCloud()
+point_cloud.points = o3d.utility.Vector3dVector(wholeworldpoint)  
+o3d.io.write_point_cloud("pointcloud/point_2_26.01.12_1.pcd", point_cloud)
